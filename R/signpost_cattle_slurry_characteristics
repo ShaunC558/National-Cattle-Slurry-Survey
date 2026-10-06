@@ -1,0 +1,491 @@
+###############################################################################
+# Cattle Slurry Nutrient Characteristics — Public Reproducibility Script
+#
+# Reproduces summary statistics, regression equations, and key figures from:
+#
+#   Connolly, S., Plunkett, M., Kearney, E., Wall, D., & O'Dwyer, J. (2026).
+#   National Cattle Slurry Characteristics Survey: Signpost Programme 2023–2024.
+#   Teagasc, Johnstown Castle, Co. Wexford, Ireland.
+#
+# Dataset: Connolly et al. (2026). Irish cattle slurry nutrient characteristics
+#   2023–2024 [Data set]. 10.5281/zenodo.23189780
+#
+# Requirements: R >= 4.1; packages listed below
+# Tested on: R 4.4.1
+#
+# Reference values used throughout:
+#   Berry et al. (2013) — Table 1, cattle slurry means:
+#     DM = 6.30 %, Total N = 2.40 kg/t, Total P = 0.50 kg/t, Total K = 3.50 kg/t
+#   NAP regulatory values (SI 588/2025):
+#     Total N = 5.0 kg/t, Total P = 0.50 kg/t
+###############################################################################
+
+# =============================================================================
+# 0. SETUP
+# =============================================================================
+
+required_pkgs <- c("ggplot2", "dplyr", "tidyr", "broom", "car", "lmtest")
+missing_pkgs  <- required_pkgs[!required_pkgs %in% installed.packages()[,"Package"]]
+if(length(missing_pkgs) > 0) install.packages(missing_pkgs)
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(car)
+library(lmtest)
+
+# --- Input file --------------------------------------------------------------
+# Set this to the folder containing zenodo_cattle_slurry_public.csv
+# Default assumes the CSV is in your current working directory
+data_file <- "zenodo_cattle_slurry_public.csv"
+
+# --- Output folder -----------------------------------------------------------
+out_dir <- "signpost_slurry_output"
+dir.create(out_dir, showWarnings = FALSE)
+
+# --- Reference values --------------------------------------------------------
+BERRY_DM  <- 6.30   # Berry et al. (2013)
+BERRY_N   <- 2.40
+BERRY_P   <- 0.50
+BERRY_K   <- 3.50
+NAP_N     <- 5.0    # SI 588/2025
+NAP_P     <- 0.50   # SI 588/2025 (updated from 0.80)
+
+# --- Plot theme --------------------------------------------------------------
+theme_slurry <- theme_minimal(base_size = 13) +
+  theme(panel.grid.minor   = element_blank(),
+        strip.background   = element_rect(fill = "grey92", colour = NA),
+        strip.text         = element_text(face = "bold"),
+        legend.position    = "bottom",
+        plot.title         = element_text(face = "bold", size = 14),
+        plot.subtitle      = element_text(size = 11, colour = "grey40"))
+
+cat("==============================================================\n")
+cat("Signpost Slurry Survey 2023-2024 — Public Reproducibility Script\n")
+cat("==============================================================\n\n")
+
+# =============================================================================
+# 1. LOAD DATA
+# =============================================================================
+cat("--- 1. Loading dataset ---\n")
+
+if(!file.exists(data_file))
+  stop("Dataset not found: ", data_file,
+       "\nDownload from Zenodo and place in your working directory.")
+
+df <- read.csv(data_file, stringsAsFactors = FALSE)
+df$Year <- factor(df$Year)
+
+# Cattle only (Sample_ID prefix CS_)
+cattle <- df[grepl("^CS_", df$Sample_ID), ]
+
+cat(sprintf("  Total rows in dataset : %d\n", nrow(df)))
+cat(sprintf("  Cattle samples (CS_*) : %d\n", nrow(cattle)))
+cat(sprintf("  By enterprise         : Beef=%d, Dairy=%d\n",
+            sum(cattle$Enterprise == "Beef", na.rm = TRUE),
+            sum(cattle$Enterprise == "Dairy", na.rm = TRUE)))
+cat(sprintf("  By year               : 2023=%d, 2024=%d\n",
+            sum(cattle$Year == "2023", na.rm = TRUE),
+            sum(cattle$Year == "2024", na.rm = TRUE)))
+
+if("Storage_Consolidated" %in% colnames(cattle)) {
+  cat("\n  Storage type breakdown:\n")
+  print(as.data.frame(table(Storage = cattle$Storage_Consolidated, useNA = "ifany")),
+        row.names = FALSE)
+}
+
+# =============================================================================
+# 2. SUMMARY STATISTICS
+# =============================================================================
+cat("\n--- 2. Summary statistics ---\n")
+
+calc_stats <- function(x) {
+  x <- na.omit(x)
+  n <- length(x)
+  data.frame(n      = n,
+             Mean   = round(mean(x), 2),
+             SD     = round(sd(x), 2),
+             SE     = round(sd(x) / sqrt(n), 2),
+             CI_lo  = round(mean(x) - qt(0.975, n-1) * sd(x) / sqrt(n), 2),
+             CI_hi  = round(mean(x) + qt(0.975, n-1) * sd(x) / sqrt(n), 2),
+             Median = round(median(x), 2),
+             Min    = round(min(x), 2),
+             Max    = round(max(x), 2))
+}
+
+params       <- c("DM_pct", "pH", "TotalN_kgt", "TotalP_kgt", "TotalK_kgt")
+param_labels <- c("DM (%)", "pH", "Total N (kg/t)", "Total P (kg/t)", "Total K (kg/t)")
+
+# Table 1: Overall
+table1 <- do.call(rbind, lapply(seq_along(params), function(i)
+  data.frame(Parameter = param_labels[i], calc_stats(cattle[[params[i]]]))))
+cat("\nTable 1: Overall Summary Statistics\n")
+print(table1, row.names = FALSE)
+write.csv(table1, file.path(out_dir, "Table1_Summary_Stats.csv"), row.names = FALSE)
+
+# Table 2: By enterprise
+table2 <- do.call(rbind, lapply(c("Beef", "Dairy"), function(ent)
+  do.call(rbind, lapply(seq_along(params), function(i)
+    data.frame(Enterprise = ent, Parameter = param_labels[i],
+               calc_stats(cattle[[params[i]]][cattle$Enterprise == ent]))))))
+cat("\nTable 2: Summary by Enterprise\n")
+print(table2, row.names = FALSE)
+write.csv(table2, file.path(out_dir, "Table2_By_Enterprise.csv"), row.names = FALSE)
+
+# Key means
+dm_mean     <- mean(cattle$DM_pct,    na.rm = TRUE)
+totaln_mean <- mean(cattle$TotalN_kgt, na.rm = TRUE)
+p_mean      <- mean(cattle$TotalP_kgt, na.rm = TRUE)
+k_mean      <- mean(cattle$TotalK_kgt, na.rm = TRUE)
+ph_mean     <- mean(cattle$pH,         na.rm = TRUE)
+
+# Table 3: Comparison with Berry et al. (2013) and NAP (SI 588/2025)
+table3 <- data.frame(
+  Parameter  = c("DM (%)", "Total N (kg/t)", "Total P (kg/t)", "Total K (kg/t)", "pH"),
+  This_Study = round(c(dm_mean, totaln_mean, p_mean, k_mean, ph_mean), 2),
+  Berry_2013 = c(BERRY_DM, BERRY_N, BERRY_P, BERRY_K, NA),
+  NAP_SI588  = c(NA, NAP_N, NAP_P, NA, NA),
+  Pct_vs_Berry = round(c(
+    (dm_mean     / BERRY_DM - 1) * 100,
+    (totaln_mean / BERRY_N  - 1) * 100,
+    (p_mean      / BERRY_P  - 1) * 100,
+    (k_mean      / BERRY_K  - 1) * 100, NA), 0),
+  Pct_vs_NAP = round(c(NA,
+    (totaln_mean / NAP_N - 1) * 100,
+    (p_mean      / NAP_P - 1) * 100, NA, NA), 0)
+)
+cat("\nTable 3: Comparison with Berry et al. (2013) and NAP (SI 588/2025)\n")
+print(table3, row.names = FALSE)
+write.csv(table3, file.path(out_dir, "Table3_Comparison.csv"), row.names = FALSE)
+
+# Table 4: Nutrient concentrations normalised per unit DM
+table4 <- data.frame(
+  Parameter  = c("Total N per %DM", "Total P per %DM", "Total K per %DM"),
+  Berry_2013 = round(c(BERRY_N/BERRY_DM, BERRY_P/BERRY_DM, BERRY_K/BERRY_DM), 3),
+  This_Study = round(c(totaln_mean/dm_mean, p_mean/dm_mean, k_mean/dm_mean), 3),
+  Change_pct = round(c(
+    (totaln_mean/dm_mean) / (BERRY_N/BERRY_DM) * 100 - 100,
+    (p_mean/dm_mean)      / (BERRY_P/BERRY_DM) * 100 - 100,
+    (k_mean/dm_mean)      / (BERRY_K/BERRY_DM) * 100 - 100), 0))
+cat("\nTable 4: Normalised Nutrient Concentrations (per unit DM)\n")
+print(table4, row.names = FALSE)
+write.csv(table4, file.path(out_dir, "Table4_Normalised.csv"), row.names = FALSE)
+
+# =============================================================================
+# 3. YEAR COMPARISON (Wilcoxon tests)
+# =============================================================================
+cat("\n--- 3. Year comparison (2023 vs 2024) ---\n")
+
+c23 <- cattle[cattle$Year == "2023", ]
+c24 <- cattle[cattle$Year == "2024", ]
+
+year_tests <- do.call(rbind, lapply(seq_along(params), function(i) {
+  w <- wilcox.test(c23[[params[i]]], c24[[params[i]]])
+  data.frame(Parameter   = param_labels[i],
+             W            = round(w$statistic, 1),
+             p_value      = round(w$p.value, 4),
+             Significant  = ifelse(w$p.value < 0.05, "Yes", "No"))
+}))
+cat("\nWilcoxon rank-sum tests (2023 vs 2024):\n")
+print(year_tests, row.names = FALSE)
+write.csv(year_tests, file.path(out_dir, "Table_Year_Tests.csv"), row.names = FALSE)
+
+# =============================================================================
+# 4. REGRESSION EQUATIONS (DM as predictor)
+# =============================================================================
+cat("\n--- 4. Regression equations (DM as predictor) ---\n")
+
+lm_n <- lm(TotalN_kgt ~ DM_pct, data = cattle)
+lm_p <- lm(TotalP_kgt ~ DM_pct, data = cattle)
+lm_k <- lm(TotalK_kgt ~ DM_pct, data = cattle)
+
+rmse <- function(m) sqrt(mean(resid(m)^2))
+
+reg_summary <- data.frame(
+  Nutrient  = c("Total N (kg/t)", "Total P (kg/t)", "Total K (kg/t)"),
+  Intercept = round(c(coef(lm_n)[1], coef(lm_p)[1], coef(lm_k)[1]), 3),
+  Slope     = round(c(coef(lm_n)[2], coef(lm_p)[2], coef(lm_k)[2]), 3),
+  R2        = round(c(summary(lm_n)$r.squared, summary(lm_p)$r.squared, summary(lm_k)$r.squared), 3),
+  RMSE_kgt  = round(c(rmse(lm_n), rmse(lm_p), rmse(lm_k)), 3),
+  p_value   = signif(c(summary(lm_n)$coefficients[2,4],
+                        summary(lm_p)$coefficients[2,4],
+                        summary(lm_k)$coefficients[2,4]), 3)
+)
+cat("\nTable 7: Regression equations (combined cattle)\n")
+print(reg_summary, row.names = FALSE)
+write.csv(reg_summary, file.path(out_dir, "Table7_Regression_Equations.csv"), row.names = FALSE)
+
+# Table 8: DM lookup
+dm_range <- 2:14
+table8 <- data.frame(
+  DM_pct  = dm_range,
+  Total_N = round(predict(lm_n, newdata = data.frame(DM_pct = dm_range)), 2),
+  Total_P = round(predict(lm_p, newdata = data.frame(DM_pct = dm_range)), 2),
+  Total_K = round(predict(lm_k, newdata = data.frame(DM_pct = dm_range)), 2)
+)
+cat("\nTable 8: DM Lookup Table (predicted nutrient concentrations)\n")
+print(table8, row.names = FALSE)
+write.csv(table8, file.path(out_dir, "Table8_DM_Lookup.csv"), row.names = FALSE)
+
+# Enterprise-specific regressions
+cat("\nEnterprise-specific regression equations:\n")
+ent_reg <- do.call(rbind, lapply(c("Beef", "Dairy"), function(ent) {
+  sub <- cattle[cattle$Enterprise == ent, ]
+  do.call(rbind, lapply(c("TotalN_kgt", "TotalP_kgt", "TotalK_kgt"), function(resp) {
+    lbl <- c("TotalN_kgt"="Total N (kg/t)","TotalP_kgt"="Total P (kg/t)","TotalK_kgt"="Total K (kg/t)")[resp]
+    m   <- lm(as.formula(paste(resp, "~ DM_pct")), data = sub)
+    s   <- summary(m)
+    cat(sprintf("  %s %s = %.3f + %.3f x DM  (R2=%.3f, RMSE=%.3f, p=%.2e)\n",
+                ent, lbl, coef(m)[1], coef(m)[2], s$r.squared, rmse(m),
+                s$coefficients[2,4]))
+    data.frame(Enterprise=ent, Nutrient=lbl, n=nrow(sub),
+               Intercept=round(coef(m)[1],3), Slope=round(coef(m)[2],3),
+               R2=round(s$r.squared,3), RMSE=round(rmse(m),3),
+               p_value=signif(s$coefficients[2,4],3))
+  }))
+}))
+write.csv(ent_reg, file.path(out_dir, "Table10_Enterprise_Regressions.csv"), row.names = FALSE)
+
+# =============================================================================
+# 5. GLM ANALYSIS
+# =============================================================================
+cat("\n--- 5. GLM analysis (DM + pH + Enterprise + Province + Year) ---\n")
+
+for(resp in c("TotalN_kgt", "TotalP_kgt", "TotalK_kgt")) {
+  lbl <- c("TotalN_kgt"="Total N","TotalP_kgt"="Total P","TotalK_kgt"="Total K")[resp]
+  mod <- lm(as.formula(paste(resp, "~ DM_pct + pH + Enterprise + Province + Year")),
+            data = cattle)
+  cat(sprintf("\n=== %s ===\n", lbl))
+  a <- Anova(mod, type = "II")
+  print(a)
+  cat(sprintf("R2 = %.3f, Adj R2 = %.3f\n",
+              summary(mod)$r.squared, summary(mod)$adj.r.squared))
+  sw <- shapiro.test(residuals(mod))
+  bp <- bptest(mod)
+  cat(sprintf("Shapiro-Wilk p = %.4f; Breusch-Pagan p = %.4f\n",
+              sw$p.value, bp$p.value))
+}
+
+# =============================================================================
+# 6. PHOSPHORUS THRESHOLD ANALYSIS (SI 588/2025)
+# =============================================================================
+cat("\n--- 6. Phosphorus threshold analysis ---\n")
+
+n_above_P   <- sum(cattle$TotalP_kgt > NAP_P, na.rm = TRUE)
+n_total_P   <- sum(!is.na(cattle$TotalP_kgt))
+pct_above_P <- round(n_above_P / n_total_P * 100, 1)
+
+cat(sprintf("  All cattle: %d / %d (%.1f%%) above NAP P = %.2f kg/t\n",
+            n_above_P, n_total_P, pct_above_P, NAP_P))
+
+p_threshold <- do.call(rbind, lapply(c("All Cattle", "Beef", "Dairy"), function(grp) {
+  sub <- if(grp == "All Cattle") cattle else cattle[cattle$Enterprise == grp, ]
+  n_t <- sum(!is.na(sub$TotalP_kgt))
+  n_a <- sum(sub$TotalP_kgt > NAP_P, na.rm = TRUE)
+  pct <- round(n_a / n_t * 100, 1)
+  cat(sprintf("  %s: %d / %d (%.1f%%)\n", grp, n_a, n_t, pct))
+  data.frame(Group=grp, n_total=n_t, n_above_0.50=n_a, pct_above=pct)
+}))
+write.csv(p_threshold, file.path(out_dir, "Table_P_Threshold_SI588.csv"), row.names = FALSE)
+
+# =============================================================================
+# 7. FIGURES
+# =============================================================================
+cat("\n--- 7. Generating figures ---\n")
+
+# Figure 1: Boxplots by enterprise
+cattle_nut_long <- cattle %>%
+  select(Enterprise, TotalN_kgt, TotalP_kgt, TotalK_kgt) %>%
+  pivot_longer(-Enterprise, names_to = "Nutrient", values_to = "Value") %>%
+  mutate(Nutrient = case_match(Nutrient,
+    "TotalN_kgt" ~ "Total N (kg/t)",
+    "TotalP_kgt" ~ "Total P (kg/t)",
+    "TotalK_kgt" ~ "Total K (kg/t)"))
+
+fig1 <- ggplot(cattle_nut_long, aes(x = Enterprise, y = Value, fill = Enterprise)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = 21) +
+  facet_wrap(~Nutrient, scales = "free_y") +
+  scale_fill_manual(values = c("Beef" = "#E8A838", "Dairy" = "#7FB3D8")) +
+  labs(title = "Cattle Slurry Nutrient Concentrations by Enterprise",
+       subtitle = "Teagasc Signpost Programme, Ireland 2023–2024",
+       y = "Concentration (kg/t)", x = "") +
+  theme_slurry + theme(legend.position = "none")
+ggsave(file.path(out_dir, "fig1_boxplots_enterprise.png"), fig1,
+       width = 12, height = 5, dpi = 300)
+cat("  fig1_boxplots_enterprise.png saved\n")
+
+# Figure 2–4: DM vs nutrients (combined)
+for(info in list(
+  list(y="TotalN_kgt", lab="Total N (kg/t)", fn="fig2_dm_vs_totalN.png", m=lm_n),
+  list(y="TotalP_kgt", lab="Total P (kg/t)", fn="fig3_dm_vs_phosphorus.png", m=lm_p),
+  list(y="TotalK_kgt", lab="Total K (kg/t)", fn="fig4_dm_vs_potassium.png", m=lm_k)
+)) {
+  fig <- ggplot(cattle, aes(x = DM_pct, y = .data[[info$y]],
+                             colour = Enterprise, shape = Year)) +
+    geom_point(size = 2.5, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, colour = "black",
+                linetype = "dashed", aes(group = 1)) +
+    scale_colour_manual(values = c("Beef" = "#E8A838", "Dairy" = "#7FB3D8")) +
+    annotate("text",
+             x = max(cattle$DM_pct, na.rm=TRUE) * 0.6,
+             y = min(cattle[[info$y]], na.rm=TRUE) * 1.15,
+             label = sprintf("%s = %.3f + %.3f \u00d7 DM\nR\u00b2 = %.3f",
+                             gsub(" \\(kg/t\\)", "", info$lab),
+                             coef(info$m)[1], coef(info$m)[2],
+                             summary(info$m)$r.squared),
+             size = 3.8, hjust = 0) +
+    labs(title = paste("Dry Matter vs", info$lab),
+         subtitle = "Teagasc Signpost Programme, Ireland 2023–2024",
+         x = "Dry Matter (%)", y = info$lab) +
+    theme_slurry
+  ggsave(file.path(out_dir, info$fn), fig, width = 9, height = 6, dpi = 300)
+  cat(sprintf("  %s saved\n", info$fn))
+}
+
+# Figure 5: Berry comparison bar chart
+comp_data <- data.frame(
+  Nutrient = rep(c("Total N", "Total P", "Total K"), 2),
+  Source   = rep(c("Berry 2013", "This Study"), each = 3),
+  Value    = c(BERRY_N, BERRY_P, BERRY_K, totaln_mean, p_mean, k_mean)
+)
+comp_data$Source <- factor(comp_data$Source, levels = c("Berry 2013", "This Study"))
+
+fig5 <- ggplot(comp_data, aes(x = Nutrient, y = Value, fill = Source)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.7) +
+  scale_fill_manual(values = c("Berry 2013" = "#C4879B", "This Study" = "#5B9BD5")) +
+  labs(title = "Comparison with Berry et al. (2013)",
+       subtitle = "Mean nutrient concentrations in Irish cattle slurry",
+       y = "Concentration (kg/t)", x = "") +
+  theme_slurry
+ggsave(file.path(out_dir, "fig5_berry_comparison.png"), fig5,
+       width = 8, height = 6, dpi = 300)
+cat("  fig5_berry_comparison.png saved\n")
+
+# Figure 6: % change vs Berry
+pct_data <- data.frame(
+  Parameter  = c("DM (%)", "Total N", "Total P", "Total K"),
+  Pct_Change = c((dm_mean/BERRY_DM - 1)*100, (totaln_mean/BERRY_N - 1)*100,
+                 (p_mean/BERRY_P   - 1)*100, (k_mean/BERRY_K     - 1)*100)
+)
+pct_data$Direction <- ifelse(pct_data$Pct_Change >= 0, "Higher", "Lower")
+
+fig6 <- ggplot(pct_data, aes(x = reorder(Parameter, Pct_Change),
+                              y = Pct_Change, fill = Direction)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  coord_flip() +
+  scale_fill_manual(values = c("Higher" = "#5B9BD5", "Lower" = "#E06666")) +
+  labs(title = "% Change vs Berry et al. (2013)",
+       subtitle = "Teagasc Signpost Programme 2023–2024 vs Berry 2013 reference",
+       x = "", y = "% Change") +
+  theme_slurry + theme(legend.position = "none")
+ggsave(file.path(out_dir, "fig6_pct_change.png"), fig6,
+       width = 8, height = 5, dpi = 300)
+cat("  fig6_pct_change.png saved\n")
+
+# Figure 7: DM density by enterprise
+beef_dm_mean  <- mean(cattle$DM_pct[cattle$Enterprise == "Beef"],  na.rm = TRUE)
+dairy_dm_mean <- mean(cattle$DM_pct[cattle$Enterprise == "Dairy"], na.rm = TRUE)
+
+fig_dm <- ggplot(cattle, aes(x = DM_pct, fill = Enterprise, colour = Enterprise)) +
+  geom_density(alpha = 0.35, linewidth = 0.8) +
+  geom_vline(xintercept = beef_dm_mean,  linetype = "dashed", colour = "#E8A838", linewidth = 0.8) +
+  geom_vline(xintercept = dairy_dm_mean, linetype = "dashed", colour = "#5B9BD5", linewidth = 0.8) +
+  geom_vline(xintercept = BERRY_DM,      linetype = "dotted", colour = "#C4879B", linewidth = 1.0) +
+  annotate("text", x = beef_dm_mean + 0.2, y = 0.19,
+           label = sprintf("Beef mean\n(%.1f%%)", beef_dm_mean),
+           colour = "#E8A838", hjust = 0, size = 3.2, fontface = "bold") +
+  annotate("text", x = dairy_dm_mean - 0.2, y = 0.19,
+           label = sprintf("Dairy mean\n(%.1f%%)", dairy_dm_mean),
+           colour = "#5B9BD5", hjust = 1, size = 3.2, fontface = "bold") +
+  annotate("text", x = BERRY_DM + 0.15, y = 0.22,
+           label = sprintf("Berry (%.1f%%)", BERRY_DM),
+           colour = "#C4879B", hjust = 0, size = 3.0) +
+  scale_fill_manual(values   = c("Beef" = "#E8A838", "Dairy" = "#5B9BD5")) +
+  scale_colour_manual(values = c("Beef" = "#E8A838", "Dairy" = "#5B9BD5")) +
+  labs(title = "Distribution of Dry Matter Content by Enterprise",
+       subtitle = sprintf("Beef (n=%d) and Dairy (n=%d), Ireland 2023–2024",
+                          sum(cattle$Enterprise=="Beef"), sum(cattle$Enterprise=="Dairy")),
+       x = "Dry Matter (%)", y = "Density") +
+  theme_slurry
+ggsave(file.path(out_dir, "fig7_dm_density_enterprise.png"), fig_dm,
+       width = 9, height = 6, dpi = 300)
+cat("  fig7_dm_density_enterprise.png saved\n")
+
+# Figure 8: P distribution with NAP threshold
+fig_p <- ggplot(cattle, aes(x = TotalP_kgt, fill = Enterprise)) +
+  geom_histogram(binwidth = 0.05, alpha = 0.7, position = "stack", colour = "white") +
+  geom_vline(xintercept = NAP_P, linetype = "dashed", colour = "#E06666", linewidth = 1) +
+  geom_vline(xintercept = 0.80,  linetype = "dotted", colour = "#999999", linewidth = 0.8) +
+  annotate("text", x = NAP_P + 0.02, y = Inf,
+           label = sprintf("NAP SI 588/2025 (%.2f kg/t)", NAP_P),
+           colour = "#E06666", vjust = 2, hjust = 0, size = 3.5) +
+  annotate("text", x = 0.82, y = Inf,
+           label = "Pre-SI588 NAP (0.80 kg/t)",
+           colour = "#999999", vjust = 3.8, hjust = 0, size = 3.0) +
+  annotate("text", x = max(cattle$TotalP_kgt, na.rm=TRUE) * 0.72, y = Inf,
+           label = sprintf("%.1f%% of samples\nabove %.2f kg/t", pct_above_P, NAP_P),
+           colour = "#2C3E50", vjust = 4.5, size = 3.8, fontface = "bold") +
+  scale_fill_manual(values = c("Beef" = "#E8A838", "Dairy" = "#7FB3D8")) +
+  labs(title = "Distribution of Total Phosphorus in Cattle Slurry",
+       subtitle = "With NAP regulatory thresholds (SI 588/2025)",
+       x = "Total P (kg/t)", y = "Count") +
+  theme_slurry
+ggsave(file.path(out_dir, "fig8_P_threshold.png"), fig_p,
+       width = 9, height = 6, dpi = 300)
+cat("  fig8_P_threshold.png saved\n")
+
+# Figure 9: Enterprise-specific scatter plots
+for(info in list(
+  list(y="TotalN_kgt", lab="Total N (kg/t)", fn="fig9a_dm_vs_N_by_enterprise.png"),
+  list(y="TotalP_kgt", lab="Total P (kg/t)", fn="fig9b_dm_vs_P_by_enterprise.png"),
+  list(y="TotalK_kgt", lab="Total K (kg/t)", fn="fig9c_dm_vs_K_by_enterprise.png")
+)) {
+  mb <- lm(as.formula(paste(info$y, "~ DM_pct")), data = cattle[cattle$Enterprise=="Beef",])
+  md <- lm(as.formula(paste(info$y, "~ DM_pct")), data = cattle[cattle$Enterprise=="Dairy",])
+
+  fig <- ggplot(cattle, aes(x = DM_pct, y = .data[[info$y]],
+                             colour = Enterprise, shape = Enterprise)) +
+    geom_point(size = 2.5, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, aes(fill = Enterprise), alpha = 0.15) +
+    scale_colour_manual(values = c("Beef" = "#E8A838", "Dairy" = "#5B9BD5")) +
+    scale_fill_manual(values   = c("Beef" = "#E8A838", "Dairy" = "#5B9BD5")) +
+    annotate("text", x = min(cattle$DM_pct, na.rm=TRUE) + 0.3,
+             y = max(cattle[[info$y]], na.rm=TRUE) * 0.96,
+             label = sprintf("Beef: y = %.3f + %.3f \u00d7 DM  (R\u00b2 = %.3f)",
+                             coef(mb)[1], coef(mb)[2], summary(mb)$r.squared),
+             size = 3.5, hjust = 0, colour = "#E8A838", fontface = "bold") +
+    annotate("text", x = min(cattle$DM_pct, na.rm=TRUE) + 0.3,
+             y = max(cattle[[info$y]], na.rm=TRUE) * 0.89,
+             label = sprintf("Dairy: y = %.3f + %.3f \u00d7 DM  (R\u00b2 = %.3f)",
+                             coef(md)[1], coef(md)[2], summary(md)$r.squared),
+             size = 3.5, hjust = 0, colour = "#5B9BD5", fontface = "bold") +
+    labs(title = paste("Dry Matter vs", info$lab, "by Enterprise"),
+         subtitle = "Teagasc Signpost Programme, Ireland 2023–2024",
+         x = "Dry Matter (%)", y = info$lab) +
+    theme_slurry
+  ggsave(file.path(out_dir, info$fn), fig, width = 10, height = 7, dpi = 300)
+  cat(sprintf("  %s saved\n", info$fn))
+}
+
+# =============================================================================
+# 8. FINAL SUMMARY
+# =============================================================================
+cat("\n==============================================================\n")
+cat("ANALYSIS COMPLETE\n")
+cat("==============================================================\n\n")
+cat(sprintf("Dataset: %d cattle samples (%d beef, %d dairy)\n",
+            nrow(cattle),
+            sum(cattle$Enterprise=="Beef"),
+            sum(cattle$Enterprise=="Dairy")))
+cat(sprintf("DM:      %.2f%% (Berry: %.2f%%, %+.0f%%)\n",
+            dm_mean, BERRY_DM, (dm_mean/BERRY_DM-1)*100))
+cat(sprintf("Total N: %.2f kg/t (Berry: %.2f, %+.0f%%)\n",
+            totaln_mean, BERRY_N, (totaln_mean/BERRY_N-1)*100))
+cat(sprintf("Total P: %.2f kg/t (Berry: %.2f, %+.0f%%; NAP: %.2f, %+.0f%%)\n",
+            p_mean, BERRY_P, (p_mean/BERRY_P-1)*100, NAP_P, (p_mean/NAP_P-1)*100))
+cat(sprintf("Total K: %.2f kg/t (Berry: %.2f, %+.0f%%)\n",
+            k_mean, BERRY_K, (k_mean/BERRY_K-1)*100))
+cat(sprintf("P above NAP threshold: %.1f%% of samples\n", pct_above_P))
+cat(sprintf("\nAll outputs saved to: %s\n", out_dir))
